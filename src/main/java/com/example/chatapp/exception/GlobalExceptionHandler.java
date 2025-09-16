@@ -46,6 +46,17 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(response);
     }
 
+    @ExceptionHandler(RedisException.class)
+    public ResponseEntity<Map<String, String>> handleRedisException(RedisException e) {
+        log.error("Redis 연결 오류: {}", e.getMessage(), e);
+
+        Map<String, String> response = new HashMap<>();
+        response.put("error", "SERVICE_UNAVAILABLE");
+        response.put("message", "시스템 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
+    }
+
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<Map<String, String>> handleIllegalStateException(IllegalStateException e) {
         log.error("상태 오류: {}", e.getMessage(), e);

@@ -1,5 +1,6 @@
 package com.example.chatapp.service;
 
+import com.example.chatapp.exception.RedisException;
 import com.example.chatapp.model.IdempotencyResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +38,7 @@ public class IdempotencyService {
         }
     }
 
-    public boolean markAsProcessing(String userId, String channelId, String clientMessageId) {
+    public boolean markAsProcessing(String userId, String channelId, String clientMessageId) throws RedisException {
         String key = buildKey(userId, channelId, clientMessageId);
 
         try {
@@ -47,7 +48,7 @@ public class IdempotencyService {
 
         } catch (Exception e) {
             log.error("Redis 처리 중 마킹 실패: {}", e.getMessage(), e);
-            return false;
+            throw new RedisException("Redis 연결 오류로 멱등성 처리 실패", e);
         }
     }
 
@@ -59,7 +60,8 @@ public class IdempotencyService {
             redisTemplate.opsForValue().set(key, value, DEFAULT_TTL);
 
         } catch (Exception e) {
-            log.error("Redis 완료 마킹 실패: {}", e.getMessage(), e);
+            log.error("Redis 완료 마킹 실패: {}, 멱등성 보장되지 않음", e.getMessage(), e);
+            // 완료 마킹 실패는 시스템 기능에는 영향 없지만, 재시도 시 중복 처리될 수 있음
         }
     }
 

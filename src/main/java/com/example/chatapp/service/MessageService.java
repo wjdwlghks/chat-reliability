@@ -4,6 +4,7 @@ import com.example.chatapp.dto.MessageRequest;
 import com.example.chatapp.dto.MessageResponse;
 import com.example.chatapp.entity.Message;
 import com.example.chatapp.exception.ConflictException;
+import com.example.chatapp.exception.RedisException;
 import com.example.chatapp.model.IdempotencyResult;
 import com.example.chatapp.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
@@ -51,8 +52,13 @@ public class MessageService {
         }
 
         // 2. 처리 시작 마킹
-        if (!idempotencyService.markAsProcessing(userId, channelId, clientMessageId)) {
-            throw new ConflictException("동시 요청이 감지되었습니다. 다시 시도해주세요.");
+        try {
+            if (!idempotencyService.markAsProcessing(userId, channelId, clientMessageId)) {
+                throw new ConflictException("동시 요청이 감지되었습니다. 다시 시도해주세요.");
+            }
+        } catch (RedisException e) {
+            log.error("Redis 연결 오류로 멱등성 처리 실패: {}", e.getMessage(), e);
+            throw new RuntimeException("시스템 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", e);
         }
 
         try {
