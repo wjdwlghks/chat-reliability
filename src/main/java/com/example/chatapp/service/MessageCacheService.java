@@ -43,7 +43,7 @@ public class MessageCacheService {
         try {
             String key = buildCacheKey(channelId);
 
-            // ZSet에서 최신 메시지들을 내림차순으로 조회 (score 높은 순)
+            // ZSet에서 최신 메시지들을 내림차순으로 조회 (score 높은 순 -> 최신 순)
             Set<String> cachedMessages = redisTemplate.opsForZSet()
                 .reverseRange(key, 0, limit - 1);
 

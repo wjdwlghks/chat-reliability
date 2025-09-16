@@ -14,6 +14,8 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -108,63 +110,149 @@ public class MessageService {
         // 기본값 설정 (고정 20개)
         int pageSize = 20;
 
-        // 1. 캐시에서 먼저 조회 시도 (Cache-Aside 패턴)
-        List<MessageResponse> cachedMessages = null;
+        // 1. 캐시에서 먼저 조회 시도
+        List<MessageResponse> cachedMessages = getCachedMessages(channelId, afterSequence, beforeSequence, pageSize);
 
+        // 2. 캐시에서 충분한 메시지를 가져온 경우
+        if (cachedMessages != null && cachedMessages.size() >= pageSize) {
+            log.info("캐시에서 충분한 메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, cachedMessages.size());
+            return cachedMessages.subList(0, pageSize); // limit 수만큼 반환
+        }
+
+        // 3. 캐시 미스이거나 부족한 경우 - 하이브리드 조회
+        return getHybridMessages(channelId, afterSequence, beforeSequence, pageSize, cachedMessages);
+    }
+
+    private List<MessageResponse> getCachedMessages(String channelId, Long afterSequence, Long beforeSequence, int pageSize) {
         try {
             if (afterSequence != null) {
-                // 스트림 복구용: 특정 시퀀스 이후 메시지들 조회
-                cachedMessages = messageCacheService.getMessagesAfter(channelId, afterSequence, pageSize);
+                return messageCacheService.getMessagesAfter(channelId, afterSequence, pageSize);
             } else if (beforeSequence != null) {
-                // 커서 기반 페이지네이션: 특정 시퀀스 이전 메시지들 조회
-                cachedMessages = messageCacheService.getMessagesBefore(channelId, beforeSequence, pageSize);
+                return messageCacheService.getMessagesBefore(channelId, beforeSequence, pageSize);
             } else {
-                // 첫 페이지: 최신 메시지들 조회
-                cachedMessages = messageCacheService.getLatestMessages(channelId, pageSize);
+                return messageCacheService.getLatestMessages(channelId, pageSize);
             }
         } catch (Exception e) {
-            log.warn("캐시 조회 중 오류 발생, DB로 fallback - channelId: {}, 오류: {}", channelId, e.getMessage());
+            log.warn("캐시 조회 중 오류 발생 - channelId: {}, 오류: {}", channelId, e.getMessage());
+            return null;
         }
+    }
 
-        // 2. 캐시 히트 시 바로 반환
-        if (cachedMessages != null && !cachedMessages.isEmpty()) {
-            log.info("캐시에서 메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, cachedMessages.size());
-            return cachedMessages;
-        }
+    private List<MessageResponse> getHybridMessages(String channelId, Long afterSequence, Long beforeSequence,
+                                                  int pageSize, List<MessageResponse> cachedMessages) {
 
-        // 3. 캐시 미스 시 DB에서 조회
-        log.debug("캐시 미스, DB에서 조회 - channelId: {}", channelId);
+        int cachedCount = cachedMessages != null ? cachedMessages.size() : 0;
+        int remainingCount = pageSize - cachedCount;
 
-        Pageable pageable = PageRequest.of(0, pageSize);
+        log.debug("하이브리드 조회 시작 - channelId: {}, 캐시된 메시지: {}개, 추가 필요: {}개",
+                 channelId, cachedCount, remainingCount);
+
+        // DB에서 추가 메시지 조회
+        List<MessageResponse> dbMessages = getAdditionalMessagesFromDB(
+            channelId, afterSequence, beforeSequence, remainingCount, cachedMessages);
+
+        // 캐시된 메시지와 DB 메시지 병합
+        List<MessageResponse> result = mergeMessages(cachedMessages, dbMessages, afterSequence);
+
+        // 새로 조회한 DB 메시지들을 캐시에 저장
+        cacheNewMessages(channelId, dbMessages, afterSequence, beforeSequence);
+
+        log.info("하이브리드 조회 완료 - channelId: {}, 총 메시지 수: {} (캐시: {}개, DB: {}개)",
+                channelId, result.size(), cachedCount, dbMessages.size());
+
+        return result;
+    }
+
+    private List<MessageResponse> getAdditionalMessagesFromDB(String channelId, Long afterSequence, Long beforeSequence,
+                                                            int remainingCount, List<MessageResponse> cachedMessages) {
+
+        Pageable pageable = PageRequest.of(0, remainingCount);
         List<Message> messages;
 
         if (afterSequence != null) {
-            // 스트림 복구용: 특정 시퀀스 이후 메시지들 조회 (오름차순)
-            messages = messageRepository.findByChannelIdAndSequenceNumberGreaterThan(channelId, afterSequence, pageable);
+            // 스트림 복구: 캐시된 메시지의 최대 시퀀스 이후부터 조회
+            Long lastCachedSequence = getLastSequenceFromCache(cachedMessages, true);
+            Long startSequence = lastCachedSequence != null ? lastCachedSequence : afterSequence;
+            messages = messageRepository.findByChannelIdAndSequenceNumberGreaterThan(channelId, startSequence, pageable);
+
         } else if (beforeSequence != null) {
-            // 커서 기반 페이지네이션: 특정 시퀀스 이전 메시지들 조회 (내림차순)
-            messages = messageRepository.findByChannelIdAndSequenceNumberLessThan(channelId, beforeSequence, pageable);
+            // 페이지네이션: 캐시된 메시지의 최소 시퀀스 이전부터 조회
+            Long lastCachedSequence = getLastSequenceFromCache(cachedMessages, false);
+            Long endSequence = lastCachedSequence != null ? lastCachedSequence : beforeSequence;
+            messages = messageRepository.findByChannelIdAndSequenceNumberLessThan(channelId, endSequence, pageable);
+
         } else {
-            // 첫 페이지: 최신 메시지들 조회 (내림차순)
-            messages = messageRepository.findByChannelIdOrderBySequenceNumberDesc(channelId, pageable);
-        }
-
-        List<MessageResponse> responses = messages.stream()
-                .map(MessageResponse::new)
-                .collect(Collectors.toList());
-
-        // 4. DB 조회 결과를 캐시에 저장 (최신 메시지인 경우만)
-        if (afterSequence == null && beforeSequence == null && !responses.isEmpty()) {
-            try {
-                responses.forEach(response -> messageCacheService.cacheMessage(channelId, response));
-                log.debug("DB 조회 결과 캐시 저장 완료 - channelId: {}, 저장된 메시지 수: {}", channelId, responses.size());
-            } catch (Exception e) {
-                log.warn("캐시 저장 중 오류 발생 - channelId: {}, 오류: {}", channelId, e.getMessage());
+            // 최신 메시지: 캐시된 메시지의 최소 시퀀스 이전부터 조회
+            Long lastCachedSequence = getLastSequenceFromCache(cachedMessages, false);
+            if (lastCachedSequence != null) {
+                messages = messageRepository.findByChannelIdAndSequenceNumberLessThan(channelId, lastCachedSequence, pageable);
+            } else {
+                messages = messageRepository.findByChannelIdOrderBySequenceNumberDesc(channelId, pageable);
             }
         }
 
-        log.info("DB에서 메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, responses.size());
-        return responses;
+        return messages.stream()
+                .map(MessageResponse::new)
+                .collect(Collectors.toList());
+    }
+
+    private Long getLastSequenceFromCache(List<MessageResponse> cachedMessages, boolean isAfterSequence) {
+        if (cachedMessages == null || cachedMessages.isEmpty()) {
+            return null;
+        }
+
+        if (isAfterSequence) {
+            // afterSequence의 경우 캐시된 메시지 중 가장 큰 시퀀스 반환
+            return cachedMessages.stream()
+                    .mapToLong(MessageResponse::getSequenceNumber)
+                    .max()
+                    .orElse(0L);
+        } else {
+            // beforeSequence나 최신 메시지의 경우 캐시된 메시지 중 가장 작은 시퀀스 반환
+            return cachedMessages.stream()
+                    .mapToLong(MessageResponse::getSequenceNumber)
+                    .min()
+                    .orElse(Long.MAX_VALUE);
+        }
+    }
+
+    private List<MessageResponse> mergeMessages(List<MessageResponse> cachedMessages, List<MessageResponse> dbMessages,
+                                              Long afterSequence) {
+
+        List<MessageResponse> result = new ArrayList<>();
+
+        if (cachedMessages != null) {
+            result.addAll(cachedMessages);
+        }
+        result.addAll(dbMessages);
+
+        // 정렬 및 중복 제거
+        if (afterSequence != null) {
+            // 스트림 복구: 시퀀스 오름차순 정렬
+            return result.stream()
+                    .sorted(Comparator.comparing(MessageResponse::getSequenceNumber))
+                    .distinct()
+                    .collect(Collectors.toList());
+        } else {
+            // 페이지네이션/최신 메시지: 시퀀스 내림차순 정렬
+            return result.stream()
+                    .sorted(Comparator.comparing(MessageResponse::getSequenceNumber).reversed())
+                    .distinct()
+                    .collect(Collectors.toList());
+        }
+    }
+
+    private void cacheNewMessages(String channelId, List<MessageResponse> newMessages, Long afterSequence, Long beforeSequence) {
+        if (newMessages.isEmpty()) {
+            return;
+        }
+
+        try {
+            newMessages.forEach(message -> messageCacheService.cacheMessage(channelId, message));
+            log.debug("DB 조회 결과 캐시 저장 완료 - channelId: {}, 저장된 메시지 수: {}", channelId, newMessages.size());
+        } catch (Exception e) {
+            log.warn("캐시 저장 중 오류 발생 - channelId: {}, 오류: {}", channelId, e.getMessage());
+        }
     }
 
     private Long getNextSequenceNumber(String channelId) {
