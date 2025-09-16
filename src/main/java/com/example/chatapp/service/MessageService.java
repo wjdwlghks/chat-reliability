@@ -24,6 +24,7 @@ public class MessageService {
 
     private final MessageRepository messageRepository;
     private final IdempotencyService idempotencyService;
+    private final MessageCacheService messageCacheService;
 
     @Transactional
     public MessageResponse saveMessage(MessageRequest request) {
@@ -83,10 +84,14 @@ public class MessageService {
             // 4. 완료 마킹
             idempotencyService.markAsCompleted(userId, channelId, clientMessageId, savedMessage.getId().toString());
 
+            // 5. 캐시에 저장
+            MessageResponse response = new MessageResponse(savedMessage);
+            messageCacheService.cacheMessage(channelId, response);
+
             log.info("메시지 저장 완료 - messageId: {}, clientMessageId: {}, sequence: {}",
                 savedMessage.getId(), clientMessageId, nextSequenceNumber);
 
-            return new MessageResponse(savedMessage);
+            return response;
 
         } catch (Exception e) {
             // 5. 실패 마킹
@@ -102,9 +107,37 @@ public class MessageService {
 
         // 기본값 설정 (고정 20개)
         int pageSize = 20;
-        Pageable pageable = PageRequest.of(0, pageSize);
 
+        // 1. 캐시에서 먼저 조회 시도 (Cache-Aside 패턴)
+        List<MessageResponse> cachedMessages = null;
+
+        try {
+            if (afterSequence != null) {
+                // 스트림 복구용: 특정 시퀀스 이후 메시지들 조회
+                cachedMessages = messageCacheService.getMessagesAfter(channelId, afterSequence, pageSize);
+            } else if (beforeSequence != null) {
+                // 커서 기반 페이지네이션: 특정 시퀀스 이전 메시지들 조회
+                cachedMessages = messageCacheService.getMessagesBefore(channelId, beforeSequence, pageSize);
+            } else {
+                // 첫 페이지: 최신 메시지들 조회
+                cachedMessages = messageCacheService.getLatestMessages(channelId, pageSize);
+            }
+        } catch (Exception e) {
+            log.warn("캐시 조회 중 오류 발생, DB로 fallback - channelId: {}, 오류: {}", channelId, e.getMessage());
+        }
+
+        // 2. 캐시 히트 시 바로 반환
+        if (cachedMessages != null && !cachedMessages.isEmpty()) {
+            log.info("캐시에서 메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, cachedMessages.size());
+            return cachedMessages;
+        }
+
+        // 3. 캐시 미스 시 DB에서 조회
+        log.debug("캐시 미스, DB에서 조회 - channelId: {}", channelId);
+
+        Pageable pageable = PageRequest.of(0, pageSize);
         List<Message> messages;
+
         if (afterSequence != null) {
             // 스트림 복구용: 특정 시퀀스 이후 메시지들 조회 (오름차순)
             messages = messageRepository.findByChannelIdAndSequenceNumberGreaterThan(channelId, afterSequence, pageable);
@@ -116,11 +149,22 @@ public class MessageService {
             messages = messageRepository.findByChannelIdOrderBySequenceNumberDesc(channelId, pageable);
         }
 
-        log.info("메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, messages.size());
-
-        return messages.stream()
+        List<MessageResponse> responses = messages.stream()
                 .map(MessageResponse::new)
                 .collect(Collectors.toList());
+
+        // 4. DB 조회 결과를 캐시에 저장 (최신 메시지인 경우만)
+        if (afterSequence == null && beforeSequence == null && !responses.isEmpty()) {
+            try {
+                responses.forEach(response -> messageCacheService.cacheMessage(channelId, response));
+                log.debug("DB 조회 결과 캐시 저장 완료 - channelId: {}, 저장된 메시지 수: {}", channelId, responses.size());
+            } catch (Exception e) {
+                log.warn("캐시 저장 중 오류 발생 - channelId: {}, 오류: {}", channelId, e.getMessage());
+            }
+        }
+
+        log.info("DB에서 메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, responses.size());
+        return responses;
     }
 
     private Long getNextSequenceNumber(String channelId) {
