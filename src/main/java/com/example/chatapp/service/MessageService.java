@@ -9,8 +9,13 @@ import com.example.chatapp.model.IdempotencyResult;
 import com.example.chatapp.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -89,6 +94,33 @@ public class MessageService {
             idempotencyService.markAsFailed(userId, channelId, clientMessageId, e.getMessage());
             throw e;
         }
+    }
+
+    public List<MessageResponse> getMessages(String channelId, Integer limit, Long afterSequence, Long beforeSequence) {
+        log.info("메시지 조회 요청 - channelId: {}, limit: {}, afterSequence: {}, beforeSequence: {}",
+            channelId, limit, afterSequence, beforeSequence);
+
+        // 기본값 설정 (고정 20개)
+        int pageSize = 20;
+        Pageable pageable = PageRequest.of(0, pageSize);
+
+        List<Message> messages;
+        if (afterSequence != null) {
+            // 스트림 복구용: 특정 시퀀스 이후 메시지들 조회 (오름차순)
+            messages = messageRepository.findByChannelIdAndSequenceNumberGreaterThan(channelId, afterSequence, pageable);
+        } else if (beforeSequence != null) {
+            // 커서 기반 페이지네이션: 특정 시퀀스 이전 메시지들 조회 (내림차순)
+            messages = messageRepository.findByChannelIdAndSequenceNumberLessThan(channelId, beforeSequence, pageable);
+        } else {
+            // 첫 페이지: 최신 메시지들 조회 (내림차순)
+            messages = messageRepository.findByChannelIdOrderBySequenceNumberDesc(channelId, pageable);
+        }
+
+        log.info("메시지 조회 완료 - channelId: {}, 조회된 메시지 수: {}", channelId, messages.size());
+
+        return messages.stream()
+                .map(MessageResponse::new)
+                .collect(Collectors.toList());
     }
 
     private Long getNextSequenceNumber(String channelId) {

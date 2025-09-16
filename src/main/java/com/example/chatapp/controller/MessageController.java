@@ -10,6 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @Slf4j
 @RestController
 @RequestMapping("/messages")
@@ -33,5 +35,21 @@ public class MessageController {
         log.info("메시지 생성 응답 - messageId: {}, status: {}", response.getId(), status);
 
         return ResponseEntity.status(status).body(response);
+    }
+
+    @GetMapping
+    public ResponseEntity<List<MessageResponse>> getMessages(
+            @RequestParam String channelId,
+            @RequestParam(required = false) Long afterSequence,
+            @RequestParam(required = false) Long beforeSequence) {
+
+        log.info("메시지 조회 요청 - channelId: {}, afterSequence: {}, beforeSequence: {}",
+            channelId, afterSequence, beforeSequence);
+
+        List<MessageResponse> messages = messageService.getMessages(channelId, null, afterSequence, beforeSequence);
+
+        log.info("메시지 조회 응답 - channelId: {}, 메시지 수: {}", channelId, messages.size());
+
+        return ResponseEntity.ok(messages);
     }
 }
