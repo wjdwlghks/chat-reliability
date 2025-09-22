@@ -58,3 +58,4 @@ application-prod.yml
 
 # Documentation
 docs/
+CLAUDE.md
