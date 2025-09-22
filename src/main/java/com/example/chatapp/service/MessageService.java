@@ -4,7 +4,6 @@ import com.example.chatapp.dto.MessageRequest;
 import com.example.chatapp.dto.MessageResponse;
 import com.example.chatapp.entity.IdempotencyKey;
 import com.example.chatapp.entity.Message;
-import com.example.chatapp.exception.ConflictException;
 import com.example.chatapp.repository.IdempotencyRepository;
 import com.example.chatapp.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
@@ -43,7 +42,8 @@ public class MessageService {
         if (existingKey.isPresent()) {
             Long existingMessageId = existingKey.get().getMessageId();
             Message existingMessage = messageRepository.findById(existingMessageId)
-                    .orElseThrow(() -> new IllegalStateException("완료된 메시지를 찾을 수 없습니다: " + existingMessageId));
+                    .orElseThrow(() -> new
+                            IllegalStateException("완료된 메시지를 찾을 수 없습니다: " + existingMessageId));
 
             log.info("멱등성 검증: 기존 메시지 반환 - messageId: {}, clientMessageId: {}",
                     existingMessageId, clientMessageId);
@@ -60,12 +60,12 @@ public class MessageService {
         );
         message.setSequenceNumber(nextSequenceNumber);
 
-        // 2. 멱등키 저장
-        IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey, message.getId());
-        idempotencyRepository.save(newIdempotencyKey);
-
-        // 3. 메시지 저장
+        // 2. 메시지 저장
         Message savedMessage = messageRepository.save(message);
+
+        // 3. 멱등키 저장
+        IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey, savedMessage.getId());
+        idempotencyRepository.save(newIdempotencyKey);
 
         // 4. 캐시에 저장
         MessageResponse response = new MessageResponse(savedMessage);

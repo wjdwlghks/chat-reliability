@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>실시간 채팅</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .chat-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background-color: #007bff;
+            color: white;
+            padding: 15px;
+            text-align: center;
+        }
+
+        .user-info {
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .user-info input {
+            margin: 5px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        .user-info button {
+            padding: 8px 15px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .chat-messages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .message {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 5px;
+        }
+
+        .message.own {
+            background-color: #007bff;
+            color: white;
+            text-align: right;
+        }
+
+        .message.other {
+            background-color: #e9ecef;
+        }
+
+        .message.system {
+            background-color: #fff3cd;
+            color: #856404;
+            text-align: center;
+            font-style: italic;
+        }
+
+        .message-input {
+            display: flex;
+            padding: 15px;
+        }
+
+        .message-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+
+        .message-input button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .status {
+            padding: 10px;
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .connected { color: #28a745; }
+        .disconnected { color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>실시간 채팅 애플리케이션</h1>
+        </div>
+
+        <div class="user-info">
+            <input type="text" id="userId" placeholder="사용자 ID" value="user1">
+            <input type="text" id="channelId" placeholder="채널 ID" value="general">
+            <button onclick="connect()" id="connectBtn">접속</button>
+            <button onclick="disconnect()" id="disconnectBtn" disabled>나가기</button>
+        </div>
+
+        <div class="status" id="status">연결되지 않음</div>
+
+        <div class="chat-messages" id="messages"></div>
+
+        <div class="message-input">
+            <input type="text" id="messageInput" placeholder="메시지를 입력하세요..." disabled>
+            <button onclick="sendMessage()" id="sendBtn" disabled>전송</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+
+    <script>
+        let stompClient = null;
+        let currentUserId = null;
+        let currentChannelId = null;
+
+        function connect() {
+            currentUserId = document.getElementById('userId').value.trim();
+            currentChannelId = document.getElementById('channelId').value.trim();
+
+            if (!currentUserId || !currentChannelId) {
+                alert('사용자 ID와 채널 ID를 입력해주세요.');
+                return;
+            }
+
+            const socket = new SockJS('/ws');
+            stompClient = Stomp.over(socket);
+
+            stompClient.connect({}, function(frame) {
+                setConnected(true);
+                console.log('Connected: ' + frame);
+
+                // 특정 채널 메시지만 구독 (중복 구독 제거)
+                stompClient.subscribe('/topic/channel/' + currentChannelId, function(message) {
+                    showMessage(JSON.parse(message.body));
+                });
+
+                // 기존 메시지 먼저 로드 후 입장 메시지 전송
+                (async () => {
+                    await loadMessages();
+                    // 기존 메시지 로드 완료 후 입장 메시지 전송
+                    stompClient.send("/app/chat.addUser", {}, JSON.stringify({
+                        userId: currentUserId,
+                        channelId: currentChannelId,
+                        clientMessageId: Date.now() + '-join',
+                        messageType: 'JOIN'
+                    }));
+                })();
+            });
+        }
+
+        function disconnect() {
+            if (stompClient !== null) {
+                // 퇴장 알림 전송 (DB 저장 안함)
+                stompClient.send("/app/chat.removeUser", {}, JSON.stringify({
+                    userId: currentUserId,
+                    channelId: currentChannelId,
+                    clientMessageId: Date.now() + '-leave'
+                }));
+
+                stompClient.disconnect();
+            }
+            setConnected(false);
+
+            // 대화창 초기화
+            clearMessages();
+
+            console.log("Disconnected");
+        }
+
+        function setConnected(connected) {
+            document.getElementById('connectBtn').disabled = connected;
+            document.getElementById('disconnectBtn').disabled = !connected;
+            document.getElementById('messageInput').disabled = !connected;
+            document.getElementById('sendBtn').disabled = !connected;
+            document.getElementById('userId').disabled = connected;
+            document.getElementById('channelId').disabled = connected;
+
+            const status = document.getElementById('status');
+            if (connected) {
+                status.textContent = `${currentChannelId} 채널에 ${currentUserId}로 연결됨`;
+                status.className = 'status connected';
+            } else {
+                status.textContent = '연결되지 않음';
+                status.className = 'status disconnected';
+            }
+        }
+
+        function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const content = messageInput.value.trim();
+
+            if (content && stompClient) {
+                const message = {
+                    userId: currentUserId,
+                    channelId: currentChannelId,
+                    content: content,
+                    clientMessageId: Date.now() + '-' + Math.random(),
+                    messageType: 'CHAT'
+                };
+
+                stompClient.send("/app/chat.sendMessage", {}, JSON.stringify(message));
+                messageInput.value = '';
+            }
+        }
+
+        function createMessageElement(message) {
+            const messageElement = document.createElement('div');
+
+            let messageClass = 'message';
+            if (message.messageType === 'JOIN' || message.messageType === 'LEAVE') {
+                messageClass += ' system';
+            } else if (message.userId === currentUserId) {
+                messageClass += ' own';
+            } else {
+                messageClass += ' other';
+            }
+
+            messageElement.className = messageClass;
+
+            // 시퀀스 번호 저장 (페이지네이션용)
+            if (message.sequenceNumber) {
+                messageElement.setAttribute('data-sequence', message.sequenceNumber);
+            }
+
+            const time = new Date(message.createdAt).toLocaleTimeString();
+
+            if (message.messageType === 'CHAT') {
+                if (message.userId === currentUserId) {
+                    messageElement.innerHTML = `<div>${message.content}</div><small>${time}</small>`;
+                } else {
+                    messageElement.innerHTML = `<strong>${message.userId}</strong>: ${message.content} <small>${time}</small>`;
+                }
+            } else {
+                // 입장/퇴장 메시지에도 타임스탬프 추가
+                messageElement.innerHTML = `${message.content} <small>${time}</small>`;
+            }
+
+            return messageElement;
+        }
+
+        function showMessage(message) {
+            const messages = document.getElementById('messages');
+            const messageElement = createMessageElement(message);
+            messages.appendChild(messageElement);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        let isLoadingMessages = false;
+        let allMessagesLoaded = false;
+
+        async function loadMessages() {
+            try {
+                const response = await fetch(`/messages?channelId=${currentChannelId}`);
+                const messages = await response.json();
+
+                // 20개 미만이면 모든 메시지 로드 완료
+                if (messages.length < 20) {
+                    allMessagesLoaded = true;
+                }
+
+                // 기존 메시지들을 시간순으로 표시
+                messages.reverse().forEach(message => {
+                    showMessage(message);
+                });
+            } catch (error) {
+                console.error('메시지 로드 실패:', error);
+            }
+        }
+
+        async function loadOlderMessages() {
+            if (isLoadingMessages || allMessagesLoaded) {
+                return;
+            }
+
+            isLoadingMessages = true;
+
+            try {
+                // 현재 화면에서 가장 오래된 메시지의 시퀀스 번호 찾기
+                const messages = document.getElementById('messages');
+                const allSequenceMessages = messages.querySelectorAll('.message[data-sequence]');
+
+                if (allSequenceMessages.length === 0) {
+                    isLoadingMessages = false;
+                    return;
+                }
+
+                // 모든 시퀀스 번호 중 가장 작은 값 찾기
+                const oldestSequence = Math.min(...Array.from(allSequenceMessages).map(msg =>
+                    parseInt(msg.getAttribute('data-sequence'))
+                ));
+                const response = await fetch(`/messages?channelId=${currentChannelId}&beforeSequence=${oldestSequence}`);
+                const olderMessages = await response.json();
+
+                if (olderMessages.length === 0) {
+                    allMessagesLoaded = true;
+                    isLoadingMessages = false;
+                    return;
+                }
+
+                // 20개 미만이면 모든 메시지 로드 완료
+                if (olderMessages.length < 20) {
+                    allMessagesLoaded = true;
+                }
+
+                // 스크롤 위치 저장
+                const scrollHeight = messages.scrollHeight;
+
+                // 이전 메시지들을 맨 위에 추가 (순서대로)
+                // 백엔드에서 이미 올바른 순서(DESC)로 받으므로 reverse() 불필요
+                olderMessages.forEach(message => {
+                    const messageElement = createMessageElement(message);
+                    messages.insertBefore(messageElement, messages.firstChild);
+                });
+
+                // 스크롤 위치 유지
+                messages.scrollTop = messages.scrollHeight - scrollHeight;
+
+            } catch (error) {
+                console.error('이전 메시지 로드 실패:', error);
+            }
+
+            isLoadingMessages = false;
+        }
+
+        // Enter 키로 메시지 전송
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // 대화창 초기화 함수
+        function clearMessages() {
+            const messages = document.getElementById('messages');
+            messages.innerHTML = '';
+            allMessagesLoaded = false; // 메시지 로드 상태 초기화
+        }
+
+        // 스크롤 이벤트 리스너 (이전 메시지 로드)
+        document.getElementById('messages').addEventListener('scroll', function() {
+            const messages = this;
+
+            // 스크롤이 맨 위에 근접하면 이전 메시지 로드
+            if (messages.scrollTop <= 50 && !isLoadingMessages && !allMessagesLoaded) {
+                loadOlderMessages();
+            }
+        });
+
+        // 페이지 종료 시 연결 해제
+        window.addEventListener('beforeunload', function() {
+            if (stompClient !== null) {
+                disconnect();
+            }
+        });
+    </script>
+</body>
+</html>
