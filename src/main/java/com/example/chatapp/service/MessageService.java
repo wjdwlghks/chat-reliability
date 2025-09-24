@@ -36,57 +36,45 @@ public class MessageService {
         String clientMessageId = request.getClientMessageId();
         String idempotencyHash = IdempotencyKey.generateHash(userId, channelId, clientMessageId);
 
-        // 1. 멱등성 체크 - Pessimistic Lock
-        Optional<IdempotencyKey> existingKey = idempotencyRepository.findByIdWithLock(idempotencyHash);
+        // 1. 멱등성 체크
+        int insertRows = idempotencyRepository.insertOnConflictDoNothing(idempotencyHash);
 
-        if (existingKey.isPresent()) {
-            // 이미 처리된 요청이므로 메시지를 찾아서 반환
+        if (insertRows > 0) {
+            // 경쟁에서 이긴 스레드
+            Long nextSequenceNumber = getNextSequenceNumber(channelId);
+
+            Message message = new Message(
+                    channelId,
+                    userId,
+                    request.getContent(),
+                    clientMessageId,
+                    request.getMessageType()
+            );
+            message.setSequenceNumber(nextSequenceNumber);
+            Message savedMessage = messageRepository.save(message);
+
+            MessageResponse response = new MessageResponse(savedMessage);
+            messageCacheService.cacheMessage(channelId, response);
+
+            log.info("메시지 저장 완료 - messageId: {}, clientMessageId: {}, sequence: {}",
+                    savedMessage.getId(), clientMessageId, nextSequenceNumber);
+
+            return response;
+        } else {
+            // 경쟁에서 진 스레드
+            log.info("중복 요청 감지, 선행 트랜잭션 완료 대기 시작 - clientMessageId: {}", clientMessageId);
+            // 선행 트랜잭션이 커밋될 때까지 여기서 대기(block)함
+            idempotencyRepository.findByHashWithReadLock(idempotencyHash);
+
+            log.info("선행 트랜잭션 완료, 기존 메시지 조회 - clientMessageId: {}", clientMessageId);
             Message existingMessage = messageRepository.findByUserIdAndChannelIdAndClientMessageId(
-                    userId, channelId, clientMessageId)
+                            userId, channelId, clientMessageId)
                     .orElseThrow(() -> new IllegalStateException("멱등키는 존재하지만 메시지를 찾을 수 없습니다: " + clientMessageId));
 
             log.info("멱등성 검증: 기존 메시지 반환 - messageId: {}, clientMessageId: {}",
                     existingMessage.getId(), clientMessageId);
             return new MessageResponse(existingMessage);
         }
-
-        // 2. 멱등키 저장 - 락 보유 상태에서 즉시 저장
-        try {
-            IdempotencyKey newIdempotencyKey = new IdempotencyKey(userId, channelId, clientMessageId);
-            idempotencyRepository.saveAndFlush(newIdempotencyKey);
-        } catch (DataIntegrityViolationException e) {
-            // 기존 메시지를 다시 조회해서 반환
-            log.warn("락 보유 중 중복 키 감지 - clientMessageId: {}", clientMessageId);
-            Message existingMessage = messageRepository.findByUserIdAndChannelIdAndClientMessageId(
-                    userId, channelId, clientMessageId)
-                    .orElseThrow(() -> new IllegalStateException("멱등키 중복이지만 메시지를 찾을 수 없습니다: " + clientMessageId));
-            return new MessageResponse(existingMessage);
-        }
-
-//        IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey);
-//        idempotencyRepository.save(newIdempotencyKey);
-
-        // 3. 메시지 생성 및 저장
-        Long nextSequenceNumber = getNextSequenceNumber(channelId);
-
-        Message message = new Message(
-                channelId,
-                userId,
-                request.getContent(),
-                clientMessageId,
-                request.getMessageType()
-        );
-        message.setSequenceNumber(nextSequenceNumber);
-        Message savedMessage = messageRepository.save(message);
-
-        // 4. 캐시에 저장
-        MessageResponse response = new MessageResponse(savedMessage);
-        messageCacheService.cacheMessage(channelId, response);
-
-        log.info("메시지 저장 완료 - messageId: {}, clientMessageId: {}, sequence: {}",
-                savedMessage.getId(), clientMessageId, nextSequenceNumber);
-
-        return response;
     }
 
     public List<MessageResponse> getMessages(String channelId, Integer limit, Long afterSequence, Long beforeSequence) {
