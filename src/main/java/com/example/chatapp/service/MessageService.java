@@ -8,6 +8,7 @@ import com.example.chatapp.repository.IdempotencyRepository;
 import com.example.chatapp.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -35,37 +36,48 @@ public class MessageService {
         String clientMessageId = request.getClientMessageId();
         String idempotencyKey = buildIdempotencyKey(userId, channelId, clientMessageId);
 
-        // 1. 멱등성 체크 - 기존 메시지가 있으면 반환
-        // Pessimistic Write 락걸기
-        Optional<IdempotencyKey> existingKey = idempotencyRepository.findById(idempotencyKey);
+        // 1. 멱등성 체크 - Pessimistic Lock
+        Optional<IdempotencyKey> existingKey = idempotencyRepository.findByIdWithLock(idempotencyKey);
 
         if (existingKey.isPresent()) {
-            Long existingMessageId = existingKey.get().getMessageId();
-            Message existingMessage = messageRepository.findById(existingMessageId)
-                    .orElseThrow(() -> new
-                            IllegalStateException("완료된 메시지를 찾을 수 없습니다: " + existingMessageId));
+            // 이미 처리된 요청이므로 메시지를 찾아서 반환
+            Message existingMessage = messageRepository.findByUserIdAndChannelIdAndClientMessageId(
+                    userId, channelId, clientMessageId)
+                    .orElseThrow(() -> new IllegalStateException("멱등키는 존재하지만 메시지를 찾을 수 없습니다: " + clientMessageId));
 
             log.info("멱등성 검증: 기존 메시지 반환 - messageId: {}, clientMessageId: {}",
-                    existingMessageId, clientMessageId);
+                    existingMessage.getId(), clientMessageId);
             return new MessageResponse(existingMessage);
         }
 
+        // 2. 멱등키 저장 - 락 보유 상태에서 즉시 저장
+        try {
+            IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey);
+            idempotencyRepository.saveAndFlush(newIdempotencyKey);
+        } catch (DataIntegrityViolationException e) {
+            // 기존 메시지를 다시 조회해서 반환
+            log.warn("락 보유 중 중복 키 감지 - clientMessageId: {}", clientMessageId);
+            Message existingMessage = messageRepository.findByUserIdAndChannelIdAndClientMessageId(
+                    userId, channelId, clientMessageId)
+                    .orElseThrow(() -> new IllegalStateException("멱등키 중복이지만 메시지를 찾을 수 없습니다: " + clientMessageId));
+            return new MessageResponse(existingMessage);
+        }
+
+//        IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey);
+//        idempotencyRepository.save(newIdempotencyKey);
+
+        // 3. 메시지 생성 및 저장
         Long nextSequenceNumber = getNextSequenceNumber(channelId);
 
         Message message = new Message(
                 channelId,
                 userId,
                 request.getContent(),
+                clientMessageId,
                 request.getMessageType()
         );
         message.setSequenceNumber(nextSequenceNumber);
-
-        // 2. 메시지 저장
         Message savedMessage = messageRepository.save(message);
-
-        // 3. 멱등키 저장
-        IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey, savedMessage.getId());
-        idempotencyRepository.save(newIdempotencyKey);
 
         // 4. 캐시에 저장
         MessageResponse response = new MessageResponse(savedMessage);

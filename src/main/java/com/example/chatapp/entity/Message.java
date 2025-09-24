@@ -29,6 +29,9 @@ public class Message {
     @Column(name = "content", nullable = false, columnDefinition = "TEXT")
     private String content;
 
+    @Column(name = "client_message_id", nullable = false)
+    private String clientMessageId;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "message_type", nullable = false)
     private MessageType messageType = MessageType.CHAT;
@@ -48,10 +51,11 @@ public class Message {
         CHAT, JOIN, LEAVE
     }
 
-    public Message(String channelId, String userId, String content, MessageType messageType) {
+    public Message(String channelId, String userId, String content, String clientMessageId, MessageType messageType) {
         this.channelId = channelId;
         this.userId = userId;
         this.content = content;
+        this.clientMessageId = clientMessageId;
         this.messageType = messageType;
     }
 }

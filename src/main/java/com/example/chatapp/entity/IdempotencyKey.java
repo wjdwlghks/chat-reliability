@@ -19,15 +19,11 @@ public class IdempotencyKey {
     @Column(name = "idempotency_key", length = 255)
     private String idempotencyKey;
 
-    @Column(name = "message_id", nullable = false)
-    private Long messageId;
-
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
-    public IdempotencyKey(String idempotencyKey, Long messageId) {
+    public IdempotencyKey(String idempotencyKey) {
         this.idempotencyKey = idempotencyKey;
-        this.messageId = messageId;
         this.createdAt = LocalDateTime.now();
     }
 }

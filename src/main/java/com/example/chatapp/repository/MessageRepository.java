@@ -10,6 +10,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface MessageRepository extends JpaRepository<Message, Long> {
@@ -29,4 +30,8 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     List<Message> findByChannelIdAndSequenceNumberGreaterThan(@Param("channelId") String channelId,
                                                              @Param("afterSequence") Long afterSequence,
                                                              Pageable pageable);
+
+    Optional<Message> findByUserIdAndChannelIdAndClientMessageId(@Param("userId") String userId,
+                                                               @Param("channelId") String channelId,
+                                                               @Param("clientMessageId") String clientMessageId);
 }
