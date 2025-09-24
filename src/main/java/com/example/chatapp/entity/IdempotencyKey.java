@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.time.LocalDateTime;
+import org.apache.commons.codec.digest.DigestUtils;
 
 @Entity
 @Table(name = "idempotency_keys")
@@ -16,14 +17,19 @@ import java.time.LocalDateTime;
 public class IdempotencyKey {
 
     @Id
-    @Column(name = "idempotency_key", length = 255)
-    private String idempotencyKey;
+    @Column(name = "idempotency_hash", length = 64, nullable = false)
+    private String idempotencyHash;
 
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
-    public IdempotencyKey(String idempotencyKey) {
-        this.idempotencyKey = idempotencyKey;
+    public IdempotencyKey(String userId, String channelId, String clientMessageId) {
+        this.idempotencyHash = generateHash(userId, channelId, clientMessageId);
         this.createdAt = LocalDateTime.now();
+    }
+
+    public static String generateHash(String userId, String channelId, String clientMessageId) {
+        String input = userId + ":" + channelId + ":" + clientMessageId;
+        return DigestUtils.sha256Hex(input);
     }
 }

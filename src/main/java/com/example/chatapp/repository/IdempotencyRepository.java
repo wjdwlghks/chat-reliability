@@ -12,7 +12,7 @@ import java.util.Optional;
 public interface IdempotencyRepository extends JpaRepository<IdempotencyKey, String> {
     // 락이 필요한 경우를 위한 별도 메서드
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("SELECT i FROM IdempotencyKey i WHERE i.idempotencyKey = :key")
+    @Query("SELECT i FROM IdempotencyKey i WHERE i.idempotencyHash = :key")
     Optional<IdempotencyKey> findByIdWithLock(String key);
 
 }

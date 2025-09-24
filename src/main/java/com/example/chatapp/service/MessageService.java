@@ -34,10 +34,10 @@ public class MessageService {
         String userId = request.getUserId();
         String channelId = request.getChannelId();
         String clientMessageId = request.getClientMessageId();
-        String idempotencyKey = buildIdempotencyKey(userId, channelId, clientMessageId);
+        String idempotencyHash = IdempotencyKey.generateHash(userId, channelId, clientMessageId);
 
         // 1. 멱등성 체크 - Pessimistic Lock
-        Optional<IdempotencyKey> existingKey = idempotencyRepository.findByIdWithLock(idempotencyKey);
+        Optional<IdempotencyKey> existingKey = idempotencyRepository.findByIdWithLock(idempotencyHash);
 
         if (existingKey.isPresent()) {
             // 이미 처리된 요청이므로 메시지를 찾아서 반환
@@ -52,7 +52,7 @@ public class MessageService {
 
         // 2. 멱등키 저장 - 락 보유 상태에서 즉시 저장
         try {
-            IdempotencyKey newIdempotencyKey = new IdempotencyKey(idempotencyKey);
+            IdempotencyKey newIdempotencyKey = new IdempotencyKey(userId, channelId, clientMessageId);
             idempotencyRepository.saveAndFlush(newIdempotencyKey);
         } catch (DataIntegrityViolationException e) {
             // 기존 메시지를 다시 조회해서 반환
@@ -242,9 +242,6 @@ public class MessageService {
     }
 
 
-    private String buildIdempotencyKey(String userId, String channelId, String clientMessageId) {
-        return userId + ":" + channelId + ":" + clientMessageId;
-    }
 
     private Long getNextSequenceNumber(String channelId) {
         Long maxSequence = messageRepository.findMaxSequenceNumberByChannelId(channelId);
