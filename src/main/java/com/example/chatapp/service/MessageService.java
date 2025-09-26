@@ -40,7 +40,6 @@ public class MessageService {
         int insertRows = idempotencyRepository.insertOnConflictDoNothing(idempotencyHash);
 
         if (insertRows > 0) {
-            // 경쟁에서 이긴 스레드
             Long nextSequenceNumber = getNextSequenceNumber(channelId);
 
             Message message = new Message(
@@ -61,12 +60,7 @@ public class MessageService {
 
             return response;
         } else {
-            // 경쟁에서 진 스레드
             log.info("중복 요청 감지, 선행 트랜잭션 완료 대기 시작 - clientMessageId: {}", clientMessageId);
-            // 선행 트랜잭션이 커밋될 때까지 여기서 대기(block)함
-            idempotencyRepository.findByHashWithReadLock(idempotencyHash);
-
-            log.info("선행 트랜잭션 완료, 기존 메시지 조회 - clientMessageId: {}", clientMessageId);
             Message existingMessage = messageRepository.findByUserIdAndChannelIdAndClientMessageId(
                             userId, channelId, clientMessageId)
                     .orElseThrow(() -> new IllegalStateException("멱등키는 존재하지만 메시지를 찾을 수 없습니다: " + clientMessageId));
